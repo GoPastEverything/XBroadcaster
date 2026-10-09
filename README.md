@@ -35,6 +35,8 @@ http://127.0.0.1:43821/callback
 
 That client id is visible during sign-in. It cannot read an account by itself. Do not put the client secret, bearer token, or stream key in the build. The stream source id is also the RTMPS stream key, so `%APPDATA%\XBroadcaster` should stay private.
 
+**Start broadcasting** sends video. It turns into **Stop broadcasting** while the encoder is running. If X has not approved this app for the Livestream API yet, create a source in X Live Studio and paste its RTMPS URL and stream key into Settings. The green button sends the video. Press Go Live in Live Studio to publish the post.
+
 ## Output
 
 1280x720, 30 fps, 4 Mbps H.264, 128 kbps AAC, keyframe every 3 seconds. X's create-source response recommends those video settings. The pipeline drops a late frame instead of queueing it.

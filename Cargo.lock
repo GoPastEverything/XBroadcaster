@@ -4606,7 +4606,7 @@ checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
 
 [[package]]
 name = "xb-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -4614,7 +4614,7 @@ dependencies = [
 
 [[package]]
 name = "xb-media"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "getrandom 0.2.17",
  "native-tls",
@@ -4626,7 +4626,7 @@ dependencies = [
 
 [[package]]
 name = "xb-x"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",
@@ -4639,7 +4639,7 @@ dependencies = [
 
 [[package]]
 name = "xbroadcaster"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "eframe",
  "serde_json",

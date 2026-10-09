@@ -56,8 +56,7 @@ struct Message {
 impl RtmpPublisher {
     pub fn connect(url: &str, stream_key: &str) -> Result<Self, MediaError> {
         let target = parse_ingest(url)?;
-        let tcp = TcpStream::connect((target.host.as_str(), target.port))
-            .map_err(|err| MediaError::message(format!("connect {}:{}: {err}", target.host, target.port)))?;
+        let tcp = connect_tcp(&target.host, target.port)?;
         tcp.set_nodelay(true).ok();
         tcp.set_read_timeout(Some(Duration::from_secs(10))).ok();
         tcp.set_write_timeout(Some(Duration::from_secs(10))).ok();
@@ -181,15 +180,28 @@ impl RtmpPublisher {
             ],
         )?;
 
-        let published = publisher.pump_until(Duration::from_secs(8), |message| {
-            command_strings(message)
-                .iter()
-                .any(|value| value.contains("NetStream.Publish.Start"))
-        })?;
-        if !published {
-            return Err(MediaError::message(
-                "RTMP server did not acknowledge NetStream.Publish.Start",
-            ));
+        let mut publish_code = None;
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        while publish_code.is_none() && std::time::Instant::now() < deadline {
+            if let Some(message) = publisher.read_message()? {
+                publisher.note_message(&message);
+                publish_code = command_strings(&message)
+                    .into_iter()
+                    .find(|value| value.starts_with("NetStream."));
+            }
+        }
+        match publish_code.as_deref() {
+            Some("NetStream.Publish.Start") => {}
+            Some(code) => {
+                return Err(MediaError::message(format!(
+                    "X rejected the stream key ({code}). In Live Studio, copy the stream key again."
+                )));
+            }
+            None => {
+                return Err(MediaError::message(
+                    "X ingest did not accept the stream. Copy the RTMPS URL and stream key from Live Studio again.",
+                ));
+            }
         }
 
         publisher
@@ -569,6 +581,23 @@ struct Ingest {
     tc_url: String,
 }
 
+fn connect_tcp(host: &str, port: u16) -> Result<TcpStream, MediaError> {
+    let mut last = String::new();
+    for attempt in 0..3 {
+        match TcpStream::connect((host, port)) {
+            Ok(stream) => return Ok(stream),
+            Err(err) if err.raw_os_error() == Some(10013) && attempt < 2 => {
+                last = err.to_string();
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(err) => {
+                return Err(MediaError::message(format!("connect {host}:{port}: {err}")));
+            }
+        }
+    }
+    Err(MediaError::message(format!("connect {host}:{port}: {last}")))
+}
+
 fn parse_ingest(url: &str) -> Result<Ingest, MediaError> {
     let tls = if url.starts_with("rtmps://") {
         true
@@ -648,32 +677,92 @@ fn command_strings(message: &Message) -> Vec<String> {
     decode_amf_strings(&message.body)
 }
 
-fn decode_amf_strings(mut data: &[u8]) -> Vec<String> {
+fn decode_amf_strings(data: &[u8]) -> Vec<String> {
     let mut found = Vec::new();
-    while !data.is_empty() {
-        match data[0] {
-            0x00 if data.len() >= 9 => data = &data[9..],
-            0x01 if data.len() >= 2 => data = &data[2..],
-            0x02 => {
-                if data.len() < 3 {
-                    break;
-                }
-                let len = u16::from_be_bytes([data[1], data[2]]) as usize;
-                if data.len() < 3 + len {
-                    break;
-                }
-                found.push(String::from_utf8_lossy(&data[3..3 + len]).into_owned());
-                data = &data[3 + len..];
-            }
-            0x05 => data = &data[1..],
-            0x03 => {
-                data = &data[1..];
-            }
-            0x09 => data = &data[1..],
-            _ => break,
-        }
-    }
+    let mut rest = data;
+    while !rest.is_empty() && take_amf(&mut rest, &mut found).is_ok() {}
     found
+}
+
+fn take_amf(data: &mut &[u8], found: &mut Vec<String>) -> Result<(), ()> {
+    if data.is_empty() {
+        return Err(());
+    }
+    let marker = data[0];
+    *data = &data[1..];
+    match marker {
+        0x00 => skip(data, 8),
+        0x01 => skip(data, 1),
+        0x02 => read_counted_string(data, found, 2),
+        0x03 => read_object(data, found),
+        0x05 | 0x06 => Ok(()),
+        0x08 => {
+            skip(data, 4)?;
+            read_object(data, found)
+        }
+        0x0A => {
+            if data.len() < 4 {
+                return Err(());
+            }
+            let count = u32::from_be_bytes(data[..4].try_into().unwrap());
+            *data = &data[4..];
+            for _ in 0..count {
+                take_amf(data, found)?;
+            }
+            Ok(())
+        }
+        0x0B => skip(data, 10),
+        0x0C => read_counted_string(data, found, 4),
+        _ => Err(()),
+    }
+}
+
+fn skip(data: &mut &[u8], len: usize) -> Result<(), ()> {
+    if data.len() < len {
+        return Err(());
+    }
+    *data = &data[len..];
+    Ok(())
+}
+
+fn read_counted_string(data: &mut &[u8], found: &mut Vec<String>, len_bytes: usize) -> Result<(), ()> {
+    if data.len() < len_bytes {
+        return Err(());
+    }
+    let len = if len_bytes == 2 {
+        usize::from(u16::from_be_bytes([data[0], data[1]]))
+    } else {
+        u32::from_be_bytes(data[..4].try_into().unwrap()) as usize
+    };
+    *data = &data[len_bytes..];
+    if data.len() < len {
+        return Err(());
+    }
+    found.push(String::from_utf8_lossy(&data[..len]).into_owned());
+    *data = &data[len..];
+    Ok(())
+}
+
+/// AMF0 object properties are a raw length-prefixed name followed by a typed value.
+fn read_object(data: &mut &[u8], found: &mut Vec<String>) -> Result<(), ()> {
+    loop {
+        if data.len() < 3 {
+            return Err(());
+        }
+        let key_len = usize::from(u16::from_be_bytes([data[0], data[1]]));
+        if key_len == 0 {
+            if data[2] != 0x09 {
+                return Err(());
+            }
+            *data = &data[3..];
+            return Ok(());
+        }
+        if data.len() < 2 + key_len {
+            return Err(());
+        }
+        *data = &data[2 + key_len..];
+        take_amf(data, found)?;
+    }
 }
 
 fn stream_id_from_create(message: &Message) -> Option<u32> {
@@ -870,6 +959,27 @@ mod tests {
         assert_eq!(nals.len(), 2);
         assert_eq!(nals[0], &[0x67, 0x42]);
         assert_eq!(nals[1], &[0x68, 0xCE]);
+    }
+
+    #[test]
+    fn on_status_code_is_inside_the_object() {
+        let mut body = Vec::new();
+        body.push(0x02);
+        body.extend_from_slice(&8u16.to_be_bytes());
+        body.extend_from_slice(b"onStatus");
+        body.push(0x00);
+        body.extend_from_slice(&0f64.to_be_bytes());
+        body.push(0x05);
+        body.push(0x03);
+        body.extend_from_slice(&4u16.to_be_bytes());
+        body.extend_from_slice(b"code");
+        body.push(0x02);
+        let code = b"NetStream.Publish.Start";
+        body.extend_from_slice(&(code.len() as u16).to_be_bytes());
+        body.extend_from_slice(code);
+        body.extend_from_slice(&[0x00, 0x00, 0x09]);
+        let strings = decode_amf_strings(&body);
+        assert!(strings.iter().any(|value| value == "NetStream.Publish.Start"));
     }
 
     #[test]

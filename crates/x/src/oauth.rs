@@ -17,6 +17,9 @@ pub enum XError {
     Message(String),
     #[error("X API {status}: {body}")]
     Api { status: u16, body: String },
+    /// The signed-in token is valid, but this X app cannot call livestream routes.
+    #[error("X has not approved this app to create broadcasts yet.")]
+    LivestreamLocked,
 }
 
 impl XError {

@@ -188,15 +188,25 @@ impl XClient {
         let status = response.status().as_u16();
         let text = response.text().unwrap_or_default();
         if status >= 400 {
-            return Err(XError::Api {
-                status,
-                body: text.chars().take(500).collect(),
-            });
+            return Err(api_error(status, path, &text));
         }
         if text.trim().is_empty() {
             return Ok(Value::Null);
         }
         serde_json::from_str(&text).map_err(|err| XError::message(format!("json: {err}: {text}")))
+    }
+}
+
+fn api_error(status: u16, path: &str, text: &str) -> XError {
+    let body: String = text.chars().take(500).collect();
+    // Livestream routes answer 403 with an empty object when the app is not whitelisted.
+    // A signed-in users.read token still succeeds on /2/users/me.
+    if status == 403 && (body.trim().is_empty() || body.trim() == "{}") {
+        return XError::LivestreamLocked;
+    }
+    XError::Api {
+        status,
+        body: format!("{path} {body}"),
     }
 }
 

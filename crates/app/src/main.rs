@@ -223,13 +223,34 @@ fn top_bar(app: &mut Studio, ui: &mut egui::Ui) {
                 let live = app.shared.live_snapshot();
                 let busy = app.busy.load(Ordering::Relaxed);
                 if live.on_air {
-                    if ui.add_enabled(!busy, egui::Button::new(RichText::new("End").color(Color32::WHITE)).fill(RED).min_size(Vec2::new(96.0, 32.0))).clicked() {
+                    if ui
+                        .add_enabled(
+                            !busy,
+                            egui::Button::new(RichText::new("Stop broadcasting").color(Color32::WHITE).strong())
+                                .fill(RED)
+                                .min_size(Vec2::new(180.0, 32.0)),
+                        )
+                        .clicked()
+                    {
                         spawn_end(app);
                     }
                 } else if ui
-                    .add_enabled(!busy, egui::Button::new(RichText::new("Go live").color(Color32::BLACK).strong()).fill(Color32::WHITE).min_size(Vec2::new(110.0, 32.0)))
+                    .add_enabled(
+                        !busy,
+                        egui::Button::new(RichText::new("Start broadcasting").color(Color32::WHITE).strong())
+                            .fill(GREEN)
+                            .min_size(Vec2::new(180.0, 32.0)),
+                    )
                     .clicked()
                 {
+                    let ready = {
+                        let broadcast = &app.shared.lock_project().broadcast;
+                        broadcast.manual_rtmps_url.trim().starts_with("rtmps://")
+                            && !broadcast.manual_stream_key.trim().is_empty()
+                    };
+                    if !ready {
+                        app.settings = true;
+                    }
                     spawn_go_live(app);
                 }
                 if ui.button("Settings").clicked() {
@@ -335,13 +356,13 @@ fn side_scenes(app: &mut Studio, ui: &mut egui::Ui) {
             }
         }
         ui.horizontal(|ui| {
-            if ui.button("Display").clicked() {
+            if ui.button("Add display").clicked() {
                 add_source(app, "Display", SourceKind::Display { monitor: 0 });
             }
-            if ui.button("Color").clicked() {
+            if ui.button("Add color").clicked() {
                 add_source(app, "Color", SourceKind::Color { color: [40, 90, 160, 255] });
             }
-            if ui.button("Text").clicked() {
+            if ui.button("Add text").clicked() {
                 add_source(
                     app,
                     "Text",
@@ -584,7 +605,7 @@ fn sign_in_screen(app: &mut Studio, ui: &mut egui::Ui) {
 
 fn settings_window(app: &mut Studio, ctx: &egui::Context) {
     let mut open = app.settings;
-    egui::Window::new("X account").open(&mut open).resizable(false).show(ctx, |ui| {
+    egui::Window::new("X account").open(&mut open).resizable(true).default_width(460.0).show(ctx, |ui| {
         if let Some(session) = &app.session {
             ui.label(RichText::new(format!("@{}", session.username)).strong());
             if !session.name.is_empty() {
@@ -604,6 +625,21 @@ fn settings_window(app: &mut Studio, ctx: &egui::Context) {
         }
         if ui.checkbox(&mut post, "Post an announcement").changed() {
             app.shared.lock_project().broadcast.post_announcement = post;
+            app.save_project();
+        }
+        ui.separator();
+        ui.label(RichText::new("Live Studio source").strong());
+        ui.label(RichText::new("In Live Studio, open RTMP details on the source, then paste the RTMPS URL and stream key here. Start broadcasting sends the video. Live Studio stays grey until that video arrives, then you press Go Live there. Stop broadcasting turns the encoder off.").color(MUTED));
+        let mut ingest_url = app.shared.lock_project().broadcast.manual_rtmps_url.clone();
+        let mut ingest_key = app.shared.lock_project().broadcast.manual_stream_key.clone();
+        ui.label("RTMPS URL");
+        if ui.add(egui::TextEdit::singleline(&mut ingest_url).desired_width(420.0).hint_text("rtmps://…")).changed() {
+            app.shared.lock_project().broadcast.manual_rtmps_url = ingest_url.trim().to_string();
+            app.save_project();
+        }
+        ui.label("Stream key");
+        if ui.add(egui::TextEdit::singleline(&mut ingest_key).password(true).desired_width(420.0)).changed() {
+            app.shared.lock_project().broadcast.manual_stream_key = ingest_key.trim().to_string();
             app.save_project();
         }
         ui.label(RichText::new("Output is 1280x720, 30 fps, 4 Mbps H.264, 44.1 kHz AAC. That is the configuration X recommends for a source.").color(MUTED));
@@ -688,6 +724,13 @@ fn spawn_go_live(app: &mut Studio) {
 }
 
 fn go_live(shared: &SharedState, client_slot: &Mutex<Option<XClient>>, output: &OutputControl) -> Result<(), XError> {
+    match go_live_with_api(shared, client_slot, output) {
+        Err(XError::LivestreamLocked) => start_saved_ingest(shared, output),
+        other => other,
+    }
+}
+
+fn go_live_with_api(shared: &SharedState, client_slot: &Mutex<Option<XClient>>, output: &OutputControl) -> Result<(), XError> {
     let mut guard = client_slot.lock().unwrap_or_else(|err| err.into_inner());
     let client = guard.as_mut().ok_or_else(|| XError::message("Sign in with X first."))?;
     set_phase(shared, "Preparing", "Checking the X account.");
@@ -760,6 +803,42 @@ fn go_live(shared: &SharedState, client_slot: &Mutex<Option<XClient>>, output: &
     Ok(())
 }
 
+fn start_saved_ingest(shared: &SharedState, output: &OutputControl) -> Result<(), XError> {
+    let broadcast = shared.lock_project().broadcast.clone();
+    let url = broadcast.manual_rtmps_url.trim().to_string();
+    let key = broadcast.manual_stream_key.trim().to_string();
+    if !url.starts_with("rtmps://") || key.is_empty() {
+        return Err(XError::message(
+            "X will not create the broadcast from this app yet. In Live Studio, create an RTMP source, then paste its RTMPS URL and stream key into Settings and press Go Live again.",
+        ));
+    }
+    set_phase(shared, "Encoder", "Sending video to your Live Studio source.");
+    *shared.output_error.lock().unwrap_or_else(|err| err.into_inner()) = None;
+    shared.output_connected.store(false, Ordering::Relaxed);
+    output.start_output(url, key);
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        if shared.output_connected.load(Ordering::Relaxed) {
+            break;
+        }
+        if let Some(err) = shared.output_error.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            return Err(XError::message(err));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if !shared.output_connected.load(Ordering::Relaxed) {
+        return Err(XError::message("The encoder did not connect to the Live Studio ingest in time."));
+    }
+    shared.set_live(LiveStatus {
+        phase: "Sending".into(),
+        detail: "Video is reaching your Live Studio source. Press Go Live there to publish the post. End here stops the encoder.".into(),
+        on_air: true,
+        error: None,
+        ..LiveStatus::default()
+    });
+    Ok(())
+}
+
 fn ensure_source(client: &mut XClient, name: &str, region: &str, saved: Option<&str>) -> Result<StreamSource, XError> {
     if let Some(id) = saved {
         if let Ok(source) = client.get_source(id) {
@@ -807,7 +886,7 @@ fn spawn_end(app: &mut Studio) {
         }
         shared.set_live(LiveStatus {
             phase: "Ended".into(),
-            detail: "The broadcast is off the air.".into(),
+            detail: "Encoder stopped.".into(),
             ..LiveStatus::default()
         });
         busy.store(false, Ordering::Relaxed);

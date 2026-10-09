@@ -50,6 +50,12 @@ pub struct BroadcastSettings {
     /// so this file should stay in the user profile.
     pub saved_source_id: Option<String>,
     pub saved_region: Option<String>,
+    /// RTMPS ingest from X Live Studio. Used when the Livestream API is locked.
+    /// The stream key stays in this profile file and is never logged.
+    #[serde(default)]
+    pub manual_rtmps_url: String,
+    #[serde(default)]
+    pub manual_stream_key: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -109,6 +115,8 @@ impl Default for Project {
                 source_name: "XBroadcaster".to_string(),
                 saved_source_id: None,
                 saved_region: None,
+                manual_rtmps_url: String::new(),
+                manual_stream_key: String::new(),
             },
             next_id: 1,
         };
