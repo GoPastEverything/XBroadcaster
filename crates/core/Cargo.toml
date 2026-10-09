@@ -1,0 +1,11 @@
+[package]
+name = "xb-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Scene model and CPU compositor for XBroadcaster"
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
