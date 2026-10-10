@@ -1,4 +1,6 @@
 # XBroadcaster
+This code is free to use however you like unless you are any part of OBS/Streamlabs or if you are in any way associated with these companies and development.
+Free for the world to use, unless you're OBS/Streamlabs.
 
 A native Windows studio for going live on X. The window, compositor, and output path are original Rust. This is not a port of OBS Studio.
 
